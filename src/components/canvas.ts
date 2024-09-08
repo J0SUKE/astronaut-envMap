@@ -29,6 +29,11 @@ export default class Canvas {
   cubeCamera: THREE.CubeCamera
   torus: THREE.Mesh
   composer: EffectComposer
+  renderTarget: THREE.WebGLRenderTarget
+  plane: THREE.Mesh
+  envMapShader: THREE.ShaderMaterial
+  debugPlane: THREE.Mesh
+  orthoCamera: THREE.OrthographicCamera
 
   constructor() {
     this.element = document.getElementById('webgl') as HTMLCanvasElement
@@ -44,9 +49,11 @@ export default class Canvas {
     this.createOrbitControls()
     this.addEventListeners()
     this.createDebug()
+    this.createEnvMapShader()
     this.setupEnvironementMap()
     this.createModel()
     this.createComposer()
+    this.createBackgroundBufferTexture()
     this.render()
   }
 
@@ -150,6 +157,64 @@ export default class Canvas {
     this.renderer.setSize(this.dimensions.width, this.dimensions.height)
   }
 
+  createEnvMapShader() {
+    this.envMapShader = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: new THREE.Uniform(
+          new THREE.TextureLoader().load('/512.png', (tex) => {
+            tex.mapping = THREE.EquirectangularReflectionMapping
+            this.scene.background = tex
+            this.scene.backgroundIntensity = 0.001
+            this.scene.backgroundBlurriness = 0.3
+          })
+        ),
+        uBluriness: {
+          value: 10,
+        },
+        uDirection: {
+          value: new THREE.Vector2(5, 5),
+        },
+        uResolution: {
+          value: new THREE.Vector2(window.innerWidth, window.innerHeight),
+        },
+      },
+      vertexShader: `
+      varying vec2 vUv;
+      void main()
+      {
+          vec4 modelPosition = modelMatrix * vec4(position, 1.0);
+          vec4 viewPosition = viewMatrix * modelPosition;
+          vec4 projectedPosition = projectionMatrix * viewPosition;
+          gl_Position = projectedPosition;
+
+          vUv=uv;
+      }
+    `,
+      fragmentShader: `
+      varying vec2 vUv;
+      uniform sampler2D uMap;
+
+      ${fragmentShader}
+
+      void main()
+      {
+        vec2 uv = vUv;
+
+        vec4 texel = texture2D(uMap,uv);
+        //vec4 texel = vec4(vec2(vUv),1.,1.);
+
+        //texel = blur(uMap, vUv, uResolution, uBluriness * uDirection);
+
+        texel.b=max(texel.b,smoothstep(0.3,1.,texel.r)*10.);
+        texel.r=min(texel.r,smoothstep(0.,0.3,texel.b)*3.);
+        texel.g=min(texel.g,smoothstep(0.,0.3,texel.b)*3.); 
+
+        gl_FragColor = texel;
+      }
+    `,
+    })
+  }
+
   setupEnvironementMap() {
     const cubeRenderTarget = new THREE.WebGLCubeRenderTarget(256, {
       type: THREE.HalfFloatType,
@@ -158,112 +223,38 @@ export default class Canvas {
     this.cubeCamera.layers.set(1)
     this.scene.environment = cubeRenderTarget.texture
 
-    const params = {
-      colorProfile: 1,
-    }
-
-    this.torus = new THREE.Mesh(
-      new THREE.TorusGeometry(4, 1),
-      new THREE.ShaderMaterial({
-        uniforms: {
-          uMap: new THREE.Uniform(
-            new THREE.TextureLoader().load('/512.png', (tex) => {
-              tex.mapping = THREE.EquirectangularReflectionMapping
-            })
-          ),
-          uBluriness: {
-            value: 10,
-          },
-          uDirection: {
-            value: new THREE.Vector2(5, 5),
-          },
-          uResolution: {
-            value: new THREE.Vector2(window.innerWidth, window.innerHeight),
-          },
-        },
-        vertexShader: `
-          varying vec2 vUv;
-          void main()
-          {
-              vec4 modelPosition = modelMatrix * vec4(position, 1.0);
-              vec4 viewPosition = viewMatrix * modelPosition;
-              vec4 projectedPosition = projectionMatrix * viewPosition;
-              gl_Position = projectedPosition;
-
-              vUv=uv;
-          }
-        `,
-        fragmentShader: `
-          varying vec2 vUv;
-          uniform sampler2D uMap;
-
-          ${fragmentShader}
-
-          void main()
-          {
-            vec2 uv = vUv;
-
-            vec4 texel = texture2D(uMap,uv);
-            //vec4 texel = vec4(vec2(vUv),1.,1.);
-
-            texel = blur(uMap, vUv, uResolution, uBluriness * uDirection);
-
-            ${
-              params.colorProfile === 0
-                ? `
-                texel.b=max(texel.b,smoothstep(0.3,1.,texel.r)*10.);
-                texel.rg*=smoothstep(0.,0.3,texel.b)*3.;
-                `
-                : ''
-            }    
-            ${
-              params.colorProfile === 1
-                ? `
-                texel.b=max(texel.b,smoothstep(0.3,1.,texel.r)*10.);
-                texel.r=min(texel.r,smoothstep(0.,0.3,texel.b)*3.);
-                texel.g=min(texel.g,smoothstep(0.,0.3,texel.b)*3.);  
-                `
-                : ''
-            }       
-            ${
-              params.colorProfile === 2
-                ? `
-                texel.rgb*=3.;
-                `
-                : ''
-            }                                      
-
-            gl_FragColor = texel;
-          }
-        `,
-      })
-    )
-
-    this.debug.add(params, 'colorProfile').min(0).max(2).step(1)
+    this.torus = new THREE.Mesh(new THREE.TorusGeometry(4, 1), this.envMapShader)
 
     this.torus.position.y = -1
     this.torus.layers.enable(1)
     this.torus.layers.disable(0)
     this.scene.add(this.torus)
+  }
 
-    // new THREE.TextureLoader().load('/environment-map.jpg', (tex) => {
-    //   tex.mapping = THREE.EquirectangularReflectionMapping
-    //   this.scene.environment = tex
-    //   this.scene.environmentRotation.y = Math.PI / 2
+  createBackgroundBufferTexture() {
+    this.renderTarget = new THREE.WebGLRenderTarget(1000, 1000, {
+      format: THREE.RGBAFormat,
+      type: THREE.FloatType,
+    })
 
-    //   this.debug
-    //     .add(this.scene.environmentRotation, 'x')
-    //     .min(0)
-    //     .max(2 * Math.PI)
-    //   this.debug
-    //     .add(this.scene.environmentRotation, 'y')
-    //     .min(0)
-    //     .max(2 * Math.PI)
-    //   this.debug
-    //     .add(this.scene.environmentRotation, 'z')
-    //     .min(0)
-    //     .max(2 * Math.PI)
-    // })
+    const width = 512
+    const height = 128
+
+    this.orthoCamera = new THREE.OrthographicCamera(-width / 2, width / 2, height / 2, -height / 2, 0, width / 2)
+    this.orthoCamera.position.set(0, width / 4, 0)
+    this.orthoCamera.lookAt(0, 0, 0)
+
+    this.plane = new THREE.Mesh(new THREE.PlaneGeometry(width, height), this.envMapShader)
+    this.plane.rotateX(-Math.PI / 2)
+
+    this.debugPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(4, 2),
+      new THREE.MeshBasicMaterial({
+        map: null,
+      })
+    )
+
+    //this.scene.add(this.debugPlane)
   }
 
   createModel() {
@@ -277,13 +268,25 @@ export default class Canvas {
     this.time = this.clock.getElapsedTime()
 
     if (this.torus) this.torus.rotation.z = time * 0.3
+    this.scene.backgroundRotation.y = time * 0.1
 
     this.orbitControls.update()
 
     this.model.update(delta)
     this.cubeCamera?.update(this.renderer, this.scene)
 
-    //this.renderer.render(this.scene, this.camera)
+    this.renderer.setRenderTarget(this.renderTarget)
+    this.renderer.render(this.plane, this.orthoCamera)
+
+    const tex = this.renderTarget.texture
+    tex.mapping = THREE.EquirectangularReflectionMapping
+    this.scene.background = tex
+
+    const m = this.debugPlane.material as THREE.MeshBasicMaterial
+    m.map = tex
+
+    this.renderer.setRenderTarget(null)
+
     this.composer.render()
   }
 }
